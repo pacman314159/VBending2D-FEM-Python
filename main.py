@@ -64,7 +64,6 @@ if __name__ == "__main__":
 
 #%% Calculate Contact & Friction -----------------------------------------------------
         F_contact = np.zeros(sheet_nodes.shape[1] * 2) # positive: Point away from body (reaction force)
-        F_friction = np.zeros(sheet_nodes.shape[1] * 2) # positive: clockwise
         K_contact = np.zeros((sheet_nodes.shape[1] * 2, sheet_nodes.shape[1] * 2))
         sheet_surface_normals = find_surface_normal(sheet_nodes, sheet_boundary)
         grid.build(
@@ -101,12 +100,6 @@ if __name__ == "__main__":
                 contact_pressure = - PENALTY_STIFFNESS_NORMAL * gap_normal
                 traction = contact_pressure * surface_normal
 
-                # Friction
-                # surface_tangent = np.array([surface_normal[1], -surface_normal[0]]) # rotate 90 deg clockwise
-                # gap_tangent = np.dot((proj - gp), surface_tangent)
-                # fric_magnitude = min(FRICTION_COEFF * contact_pressure, PENALTY_STIFFNESS_TANGENT * abs(gap_tangent))
-                # friction = -fric_magnitude * np.sign(gap_tangent) * surface_tangent
-
                 # Assemble nodal forces
                 N1, N2 = (1 - xi) / 2.0, (1 + xi) / 2.0
                 id1, id2 = sheet_boundary[:, seg_id]
@@ -114,16 +107,10 @@ if __name__ == "__main__":
                 segment_length = np.linalg.norm(p2 - p1)
                 f1c = N1 * gauss_weight * traction * segment_length / 2.0
                 f2c = N2 * gauss_weight * traction * segment_length / 2.0
-                # f1f = N1 * gauss_weight * friction * segment_length / 2.0
-                # f2f = N2 * gauss_weight * friction * segment_length / 2.0
                 F_contact[id1*2] += f1c[0]
                 F_contact[id2*2] += f2c[0]
                 F_contact[id1*2+1] += f1c[1]
                 F_contact[id2*2+1] += f2c[1]
-                # F_friction[id1*2] += f1f[0]
-                # F_friction[id2*2] += f2f[0]
-                # F_friction[id1*2+1] += f1f[1]
-                # F_friction[id2*2+1] += f2f[1]
 
 #%%
 
@@ -195,7 +182,7 @@ if __name__ == "__main__":
 #%%
 
 
-        F_external = F_body - F_friction - F_contact
+        F_external = F_body - F_contact
         K_tangent = K_material + K_geometric
         Residual = F_external - F_internal
 
