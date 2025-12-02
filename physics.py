@@ -17,14 +17,17 @@ FRICTION_COEFF = 0.1
 PENALTY_STIFFNESS_NORMAL = 1e6 # N/m^3
 PENALTY_STIFFNESS_TANGENT = 1e6 # N/m^3
 
+# For Plane Strain Problem
 D_MATRIX = np.array([
     [1 - POISSON_RATIO, -POISSON_RATIO, 0],
     [-POISSON_RATIO, 1-POISSON_RATIO, 0],
     [0, 0, 0.5 * (1 - 2 * POISSON_RATIO)]
 ]) * YOUNG_MODULUS / (1 + POISSON_RATIO) / (1 - 2 * POISSON_RATIO)
 
+MAX_NEWTON_ITERATIONS = 5
+
 #%%
-def elem_body_force_func(xi, eta, **kwargs):
+def body_force_func(xi, eta, **kwargs):
     if kwargs == {}: return np.zeros(8)
 
     N1 = 0.25 * (1 - xi) * (1 - eta)
@@ -39,7 +42,7 @@ def elem_body_force_func(xi, eta, **kwargs):
 #%%
 
 #%%
-def elem_stiffness_matrix_func(xi, eta, **kwargs):
+def material_stiffness_matrix_func(xi, eta, **kwargs):
     if kwargs == {}: return np.zeros((8, 8))
 
     J = kwargs["J"]              # 2×2 Jacobian (undeformed)
@@ -56,7 +59,7 @@ def elem_stiffness_matrix_func(xi, eta, **kwargs):
 #%%
 
 #%%
-def elem_internal_force_func(xi, eta, **kwargs):
+def internal_force_func(xi, eta, **kwargs):
     """
     Total-Lagrangian internal force at a Gauss point for a 4-node quad.
     Returns 8x1 vector f_int_gp (this is the integrand: B^T * PK2).
@@ -106,7 +109,7 @@ def elem_internal_force_func(xi, eta, **kwargs):
 #%%
 
 #%%
-def elem_geometric_matrix_func(xi, eta, **kwargs):
+def geometric_matrix_func(xi, eta, **kwargs):
     """
     Return 8x8 geometric stiffness matrix contribution at this Gauss point (the integrand).
     Assumes kwargs contains: 'J', 'der', 'u_e'.
@@ -159,6 +162,7 @@ def elem_geometric_matrix_func(xi, eta, **kwargs):
     return K_geo
 #%%
 
+#%%
 def apply_dirichlet(K, R, fixed_dofs):
     """
     Applies Dirichlet BCs in-place.
@@ -171,3 +175,4 @@ def apply_dirichlet(K, R, fixed_dofs):
     R[dofs] = 0.0
     
     return K, R
+#%%
