@@ -69,7 +69,7 @@ def worker_physics(args):
 def assemble_and_solve(
     sheet_nodes, sheet_elems, sheet_boundary, 
     punch_nodes, punch_edges, die_nodes, die_edges,
-    Disp_global, grid, fixed_dofs, parallelism
+    Disp_global, grid, fixed_dofs
 ):
 
 #%% 1. UPDATE GEOMETRY
@@ -150,40 +150,22 @@ def assemble_and_solve(
 #%%
 
 #%% 4. BODY, INTERNAL FORCES & MATERIAL, GEOMETRIC STIFFNESS MATRICES
-    if parallelism:
-        num_workers = 8
-        chunks = np.array_split(sheet_elems, num_workers)
-        args_list = []
-        for chunk in chunks:
-            if len(chunk) > 0:
-                args_list.append((chunk, sheet_nodes, Disp_global.copy(), Total_dofs))
+    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
+        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
+        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
+        u_e = Disp_global[elem_dofs]
 
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            results = list(executor.map(worker_physics, args_list))
+        # Integration
+        f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
 
-        for f_b, f_i, k_m, k_g in results:
-            F_body      += f_b
-            F_internal  += f_i
-            K_material  += k_m
-            K_geometric += k_g
-
-    else:
-        for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
-            elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
-            elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
-            u_e = Disp_global[elem_dofs]
-
-            # Integration
-            f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-            f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-            k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-            k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-
-            # Assembly
-            F_body[elem_dofs] += f_body
-            F_internal[elem_dofs] += f_int
-            K_material[np.ix_(elem_dofs, elem_dofs)] += k_mat
-            K_geometric[np.ix_(elem_dofs, elem_dofs)] += k_geom
+        # Assembly
+        F_body[elem_dofs] += f_body
+        F_internal[elem_dofs] += f_int
+        K_material[np.ix_(elem_dofs, elem_dofs)] += k_mat
+        K_geometric[np.ix_(elem_dofs, elem_dofs)] += k_geom
 #%%
 
 #%% 5. SOLVE
@@ -235,7 +217,7 @@ if __name__ == "__main__":
             delta_u, res_norm = assemble_and_solve(
                 sheet_nodes, sheet_elems, sheet_boundary,
                 punch_nodes, punch_edges, die_nodes, die_edges,
-                Disp_global, grid, fixed_dofs, parallelism=False
+                Disp_global, grid, fixed_dofs
             )
 
             if res_norm > 1000:  damping = 0.1 
