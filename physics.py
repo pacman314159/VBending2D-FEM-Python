@@ -14,7 +14,7 @@ NUM_GP_2D_ELEM_PER_SIDE = 2
 # Kinematics Constants
 PUNCH_VELOCITY = np.array([0, -10]).reshape((2,1)) # mm/s
 FRICTION_COEFF = 0.1
-PENALTY_STIFFNESS_NORMAL = 1e8
+PENALTY_STIFFNESS_NORMAL = 1e5
 
 # For Plane Strain Problem
 D_MATRIX = np.array([
@@ -23,8 +23,8 @@ D_MATRIX = np.array([
     [0, 0, 0.5 * (1 - 2 * POISSON_RATIO)]
 ]) * YOUNG_MODULUS / (1 + POISSON_RATIO) / (1 - 2 * POISSON_RATIO)
 
-MAX_NEWTON_ITERATIONS = 10
-TIME_STEP = 1e-4 #s
+MAX_NEWTON_ITERATIONS = 15
+TIME_STEP = 0.5e-3 #s
 NEWTON_RAPHSON_TOLERANCE = 1e1
 
 #%%

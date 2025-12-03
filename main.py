@@ -1,72 +1,13 @@
+import os
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import matplotlib.pyplot as plt
 from mesh_gen import *
 from grid_hash import *
 from maths import *
 from physics import *
-from concurrent.futures import ProcessPoolExecutor
 
-#%%
-def worker_f_body(args):
-    sheet_elems, sheet_nodes, Total_dofs = args
-
-    F_body = np.zeros(Total_dofs)
-    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
-        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
-        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
-        f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        F_body[elem_dofs] += f_body
-
-    return F_body
-#%%
-
-#%%
-def worker_f_int(args):
-    sheet_elems, sheet_nodes, Disp_global, Total_dofs = args
-    F_internal = np.zeros(Total_dofs)
-
-    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
-        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
-        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
-        u_e = Disp_global[elem_dofs]
-
-        f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        F_internal[elem_dofs] += f_int
-
-    return F_internal
-#%%
-
-#%%
-def worker_K_mat(args):
-    sheet_elems, sheet_nodes, Disp_global, Total_dofs = args
-    K_material = np.zeros((Total_dofs, Total_dofs))
-
-    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
-        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
-        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
-        u_e = Disp_global[elem_dofs]
-
-        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-
-        K_material[np.ix_(elem_dofs, elem_dofs)] += k_mat
-    return K_material
-#%%
-
-#%%
-def worker_K_geom(args):
-    sheet_elems, sheet_nodes, Disp_global, Total_dofs = args
-    K_geometric = np.zeros((Total_dofs, Total_dofs))
-
-    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
-        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
-        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
-        u_e = Disp_global[elem_dofs]
-
-        k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        K_geometric[np.ix_(elem_dofs, elem_dofs)] += k_geom
-
-    return K_geometric
-#%%
+os.environ["OMP_NUM_THREADS"] = "1"
 
 #%%
 def visualize(sheet_nodes, sheet_edges, punch_nodes, punch_edges, die_nodes, die_edges):
@@ -96,11 +37,41 @@ def visualize(sheet_nodes, sheet_edges, punch_nodes, punch_edges, die_nodes, die
     plt.show()
 #%%
 
+#%%
+def worker_physics(args):
+    subset_elems, sheet_nodes, Disp_global, Total_dofs = args
+    
+    F_body_local      = np.zeros(Total_dofs)
+    F_internal_local  = np.zeros(Total_dofs)
+    K_material_local  = np.zeros((Total_dofs, Total_dofs))
+    K_geometric_local = np.zeros((Total_dofs, Total_dofs))
+
+    for first, fourth, third, second in subset_elems: # Ensure direction is CCW
+        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
+        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
+        u_e = Disp_global[elem_dofs]
+
+        # Integration
+        f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+
+        # Assembly
+        F_body_local[elem_dofs] += f_body
+        F_internal_local[elem_dofs] += f_int
+        K_material_local[np.ix_(elem_dofs, elem_dofs)] += k_mat
+        K_geometric_local[np.ix_(elem_dofs, elem_dofs)] += k_geom
+
+    return F_body_local, F_internal_local, K_material_local, K_geometric_local
+#%%
+
 def assemble_and_solve(
     sheet_nodes, sheet_elems, sheet_boundary, 
     punch_nodes, punch_edges, die_nodes, die_edges,
-    Disp_global, grid, fixed_dofs
+    Disp_global, grid, fixed_dofs, parallelism
 ):
+
 #%% 1. UPDATE GEOMETRY
     current_sheet_nodes = sheet_nodes + Disp_global.reshape((2, -1), order='F')
     sheet_gp, sheet_gp_dict = find_gaussian_points_on_boundary(current_sheet_nodes, sheet_boundary, NUM_GP_CONTACT)
@@ -115,13 +86,13 @@ def assemble_and_solve(
     )
 #%%
 
-#%% 2. INITIALIZE MATRICES
-    F_contact   = np.zeros(Total_dofs) # positive: Point away from body (reaction force)
+#%% 2. MATRIX INITIALIZATION
     F_body      = np.zeros(Total_dofs)
     F_internal  = np.zeros(Total_dofs)
-    K_contact   = np.zeros((Total_dofs, Total_dofs))
+    F_contact   = np.zeros(Total_dofs) # positive: Point away from body (reaction force)
     K_material  = np.zeros((Total_dofs, Total_dofs))
     K_geometric = np.zeros((Total_dofs, Total_dofs))
+    K_contact   = np.zeros((Total_dofs, Total_dofs))
 #%%
 
 #%% 3. CONTACT DETECTION, FORCES & STIFFNESS MATRIX
@@ -142,8 +113,6 @@ def assemble_and_solve(
             first_seg_id = np.where(master_edges[0] == closest_node_id)[0]
             second_seg_id = np.where(master_edges[1] == closest_node_id)[0]
             closest_seg_id, _, proj = find_projection(gp, master_nodes, master_edges, [first_seg_id, second_seg_id])
-
-            # plt.plot([gp[0], proj[0]], [gp[1], proj[1]], color='blue')
             
             # Penetration detection
             gap_normal = np.dot((proj - gp), surface_normal)
@@ -181,34 +150,40 @@ def assemble_and_solve(
 #%%
 
 #%% 4. BODY, INTERNAL FORCES & MATERIAL, GEOMETRIC STIFFNESS MATRICES
+    if parallelism:
+        num_workers = 8
+        chunks = np.array_split(sheet_elems, num_workers)
+        args_list = []
+        for chunk in chunks:
+            if len(chunk) > 0:
+                args_list.append((chunk, sheet_nodes, Disp_global.copy(), Total_dofs))
 
-    # with ProcessPoolExecutor(max_workers=4) as executor:
-    #     future_F_body = executor.submit(worker_f_body, (sheet_elems, sheet_nodes, Total_dofs))
-    #     future_F_int  = executor.submit(worker_f_int,  (sheet_elems, sheet_nodes, Disp_global, Total_dofs))
-    #     future_K_mat  = executor.submit(worker_K_mat,  (sheet_elems, sheet_nodes, Disp_global, Total_dofs))
-    #     future_K_geom = executor.submit(worker_K_geom, (sheet_elems, sheet_nodes, Disp_global, Total_dofs))
-    #
-    #     F_body      = future_F_body.result()
-    #     F_internal  = future_F_int.result()
-    #     K_material  = future_K_mat.result()
-    #     K_geometric = future_K_geom.result()
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            results = list(executor.map(worker_physics, args_list))
 
-    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
-        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
-        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
-        u_e = Disp_global[elem_dofs]
+        for f_b, f_i, k_m, k_g in results:
+            F_body      += f_b
+            F_internal  += f_i
+            K_material  += k_m
+            K_geometric += k_g
 
-        # Integration
-        f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+    else:
+        for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
+            elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
+            elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
+            u_e = Disp_global[elem_dofs]
 
-        # Assembly
-        F_body[elem_dofs] += f_body
-        F_internal[elem_dofs] += f_int
-        K_material[np.ix_(elem_dofs, elem_dofs)] += k_mat
-        K_geometric[np.ix_(elem_dofs, elem_dofs)] += k_geom
+            # Integration
+            f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+            f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+            k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+            k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+
+            # Assembly
+            F_body[elem_dofs] += f_body
+            F_internal[elem_dofs] += f_int
+            K_material[np.ix_(elem_dofs, elem_dofs)] += k_mat
+            K_geometric[np.ix_(elem_dofs, elem_dofs)] += k_geom
 #%%
 
 #%% 5. SOLVE
@@ -220,9 +195,10 @@ def assemble_and_solve(
 
     Delta_u = np.linalg.solve(K_tangent, Residual)
     res_norm = np.linalg.norm(Residual)
-#%%
 
     return Delta_u, res_norm
+#%%
+
 
 #%%
 if __name__ == "__main__":
@@ -237,8 +213,9 @@ if __name__ == "__main__":
     Total_dofs = sheet_nodes.shape[1] * 2
     Disp_global = np.zeros(Total_dofs)
     t = 0
-    num_loops = 5
+    num_loops = 50
     first_loop = True
+    damping = 1.0
 
     fixed_dofs = np.concatenate((
         np.argsort(np.abs(sheet_nodes[0]))[:5] * 2,
@@ -255,12 +232,17 @@ if __name__ == "__main__":
 
         # 4. NEWTON-RAPHSON LOOP
         for iter in range(MAX_NEWTON_ITERATIONS):
-        # for iter in range(10):
             delta_u, res_norm = assemble_and_solve(
                 sheet_nodes, sheet_elems, sheet_boundary,
                 punch_nodes, punch_edges, die_nodes, die_edges,
-                Disp_global, grid, fixed_dofs
+                Disp_global, grid, fixed_dofs, parallelism=False
             )
+
+            if res_norm > 1000:  damping = 0.1 
+            elif res_norm > 100: damping = 0.25
+            elif res_norm > 10:  damping = 0.5
+            else: damping = 1.0
+
             Disp_global += delta_u
 
             print(f"   Iter {iter}: ||R|| = {res_norm:.4e}")
