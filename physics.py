@@ -3,7 +3,7 @@ import numpy as np
 # Material Properties
 YOUNG_MODULUS = 213 #GPa
 POISSON_RATIO = 0.3
-DENSITY = 7850e-9 #kg.mm^-3
+DENSITY = 7.85e-9 #kg.mm^-3
 YIELD_STRESS = 348 #MPa
 
 GRAVITY_ACCEL = np.array([0, -9810]) #mm.s^-2
@@ -14,8 +14,7 @@ NUM_GP_2D_ELEM_PER_SIDE = 2
 # Kinematics Constants
 PUNCH_VELOCITY = np.array([0, -10]).reshape((2,1)) # mm/s
 FRICTION_COEFF = 0.1
-PENALTY_STIFFNESS_NORMAL = 1e6 # N/m^3
-PENALTY_STIFFNESS_TANGENT = 1e6 # N/m^3
+PENALTY_STIFFNESS_NORMAL = 1e8
 
 # For Plane Strain Problem
 D_MATRIX = np.array([
@@ -24,7 +23,9 @@ D_MATRIX = np.array([
     [0, 0, 0.5 * (1 - 2 * POISSON_RATIO)]
 ]) * YOUNG_MODULUS / (1 + POISSON_RATIO) / (1 - 2 * POISSON_RATIO)
 
-MAX_NEWTON_ITERATIONS = 5
+MAX_NEWTON_ITERATIONS = 10
+TIME_STEP = 1e-4 #s
+NEWTON_RAPHSON_TOLERANCE = 1e1
 
 #%%
 def body_force_func(xi, eta, **kwargs):
@@ -43,69 +44,91 @@ def body_force_func(xi, eta, **kwargs):
 
 #%%
 def material_stiffness_matrix_func(xi, eta, **kwargs):
+    """
+    Computes the Material Tangent Stiffness Matrix (K_L) for Total Lagrangian.
+    K_L = Integral( B_L.T * D * B_L ) dV0
+    (Simplified for St. Venant-Kirchhoff)
+    """
     if kwargs == {}: return np.zeros((8, 8))
 
-    J = kwargs["J"]              # 2×2 Jacobian (undeformed)
-    dN_dxi = kwargs["der"]       # 2×4 (dN/dxi, dN/deta)
+    J = kwargs["J"]             # 2x2 Jacobian of UNDEFORMED element (Reference)
+    dN_dxi = kwargs["der"]      # 2x4 Local derivatives
+    u_e = kwargs["u_e"]         # 8x1 Nodal displacements
+
     inv_J = np.linalg.inv(J)
-    dN_dx = inv_J @ dN_dxi
+    dN_dX = inv_J @ dN_dxi
 
-    first_row = np.array([dN_dx[0, 0], 0, dN_dx[0, 1], 0, dN_dx[0, 2], 0, dN_dx[0, 3], 0])
-    second_row = np.array([0, dN_dx[1, 0], 0, dN_dx[1, 1], 0, dN_dx[1, 2], 0, dN_dx[1, 3]])
-    third_row = np.array([dN_dx[1, 0], dN_dx[0, 0], dN_dx[1, 1], dN_dx[0, 1], dN_dx[1, 2], dN_dx[0, 2], dN_dx[1, 3], dN_dx[0, 3]])
-    B_linear = np.vstack((first_row, second_row, third_row))
+    u_nodes = u_e.reshape(4, 2)
+    grad_u = u_nodes.T @ dN_dX.T 
+    F = np.eye(2) + grad_u
+    B_L = np.zeros((3, 8))
+    
+    F11, F12 = F[0, 0], F[0, 1]
+    F21, F22 = F[1, 0], F[1, 1]
 
-    return B_linear.T @ D_MATRIX @ B_linear
+    for i in range(4):
+        dN_dX_i = dN_dX[0, i]
+        dN_dY_i = dN_dX[1, i]
+        B_L[0, 2*i]     = F11 * dN_dX_i
+        B_L[0, 2*i+1]   = F21 * dN_dX_i
+        B_L[1, 2*i]     = F12 * dN_dY_i
+        B_L[1, 2*i+1]   = F22 * dN_dY_i
+        B_L[2, 2*i]     = F11 * dN_dY_i + F12 * dN_dX_i
+        B_L[2, 2*i+1]   = F21 * dN_dY_i + F22 * dN_dX_i
+
+    # 4. Stiffness Calculation
+    return B_L.T @ D_MATRIX @ B_L
 #%%
 
 #%%
 def internal_force_func(xi, eta, **kwargs):
     """
-    Total-Lagrangian internal force at a Gauss point for a 4-node quad.
-    Returns 8x1 vector f_int_gp (this is the integrand: B^T * PK2).
-    kwargs contains:
-      - 'J' : Jacobian (2x2) of reference element (undeformed)
-      - 'der': dN_dxi (2x4)
-      - 'u_e': element nodal displacement vector (8,)  (used for computing strain via Green-Lagrange)
+    Computes Internal Force Vector.
+    F_int = Integral( B_L.T * S ) dV0
+    where S is the Second Piola-Kirchhoff stress.
+   
     """
     if kwargs == {}: return np.zeros(8)
 
     J = kwargs["J"]
-    dN_dxi = kwargs["der"]   # (2,4) : dN/dxi, dN/deta
-    u_e = kwargs["u_e"]      # length 8
+    dN_dxi = kwargs["der"]
+    u_e = kwargs["u_e"]
 
-    # Derivatives wrt reference coords (x0)
-    invJ = np.linalg.inv(J)
-    dN_dx = invJ @ dN_dxi     # (2,4)
+    # 1. Derivatives w.r.t Initial Coordinates X
+    inv_J = np.linalg.inv(J)
+    dN_dX = inv_J @ dN_dxi
 
-    # build standard linear B (3 x 8) for Green-Lagrange linear part
-    B_nonlinear = np.zeros((3, 8))
-    for i in range(4):
-        dNdx = dN_dx[0, i]
-        dNdy = dN_dx[1, i]
-        B_nonlinear[0, 2*i    ] = dNdx
-        B_nonlinear[1, 2*i+1  ] = dNdy
-        B_nonlinear[2, 2*i    ] = dNdy
-        B_nonlinear[2, 2*i+1  ] = dNdx
+    # 2. Deformation Gradient F
+    u_nodes = u_e.reshape(4, 2)
+    grad_u = u_nodes.T @ dN_dX.T
+    F = np.eye(2) + grad_u
 
-    # compute deformation gradient and Green-Lagrange strain as in your code
-    u_nodes = u_e.reshape(4,2)
-    F = np.eye(2)
-    for i in range(4):
-        dNix = dN_dx[0, i]; dNiy = dN_dx[1, i]
-        F[0,0] += u_nodes[i,0] * dNix
-        F[0,1] += u_nodes[i,0] * dNiy
-        F[1,0] += u_nodes[i,1] * dNix
-        F[1,1] += u_nodes[i,1] * dNiy
-
+    # 3. Green-Lagrange Strain E = 0.5 * (F.T*F - I)
     C = F.T @ F
-    E = 0.5 * (C - np.eye(2)) # Green-Lagrange strain tensor
+    E = 0.5 * (C - np.eye(2))
+    
+    # Voigt notation for 2D Plane Strain: [E_11, E_22, 2*E_12]
     strain_vec = np.array([E[0,0], E[1,1], 2.0*E[0,1]])
 
-    PK2_stress = D_MATRIX @ strain_vec
+    PK2_stress = D_MATRIX @ strain_vec # Second Piola-Kirchhoff Stress
 
-    f_int_gp = B_nonlinear.T @ PK2_stress   # (8,)
-    return f_int_gp
+    # Construct B_L Matrix
+    B_L = np.zeros((3, 8))
+    F11, F12 = F[0, 0], F[0, 1]
+    F21, F22 = F[1, 0], F[1, 1]
+
+    for i in range(4):
+        dN_dX_i = dN_dX[0, i]
+        dN_dY_i = dN_dX[1, i]
+        
+        B_L[0, 2*i]     = F11 * dN_dX_i
+        B_L[0, 2*i+1]   = F21 * dN_dX_i
+        B_L[1, 2*i]     = F12 * dN_dY_i
+        B_L[1, 2*i+1]   = F22 * dN_dY_i
+        B_L[2, 2*i]     = F11 * dN_dY_i + F12 * dN_dX_i
+        B_L[2, 2*i+1]   = F21 * dN_dY_i + F22 * dN_dX_i
+
+    return B_L.T @ PK2_stress
 #%%
 
 #%%

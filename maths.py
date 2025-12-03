@@ -12,6 +12,8 @@ DIE_ANGLE = 86
 DIE_GROOVE_LENGTH = 12 #mm
 DIE_CURVE_RADIUS = 2.5 #mm
 
+PENETRATION_ANGLE_THRESHOLD = 30
+
 # def get_CFL_limit(nodes, young_modulus, poission_ratio, density, safety=0.9):
 #     """
 #     Compute CFL time step (in seconds) for a 2D plane-strain mesh.

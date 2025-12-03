@@ -4,12 +4,97 @@ from mesh_gen import *
 from grid_hash import *
 from maths import *
 from physics import *
+from concurrent.futures import ProcessPoolExecutor
 
-# Animation Constants
-TIME_STEP = 0.001 #s
-FEA_TIME_STEP = 1e-4 #s
+#%%
+def worker_f_body(args):
+    sheet_elems, sheet_nodes, Total_dofs = args
 
-TOLERANCE = 1e-4
+    F_body = np.zeros(Total_dofs)
+    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
+        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
+        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
+        f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        F_body[elem_dofs] += f_body
+
+    return F_body
+#%%
+
+#%%
+def worker_f_int(args):
+    sheet_elems, sheet_nodes, Disp_global, Total_dofs = args
+    F_internal = np.zeros(Total_dofs)
+
+    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
+        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
+        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
+        u_e = Disp_global[elem_dofs]
+
+        f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        F_internal[elem_dofs] += f_int
+
+    return F_internal
+#%%
+
+#%%
+def worker_K_mat(args):
+    sheet_elems, sheet_nodes, Disp_global, Total_dofs = args
+    K_material = np.zeros((Total_dofs, Total_dofs))
+
+    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
+        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
+        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
+        u_e = Disp_global[elem_dofs]
+
+        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+
+        K_material[np.ix_(elem_dofs, elem_dofs)] += k_mat
+    return K_material
+#%%
+
+#%%
+def worker_K_geom(args):
+    sheet_elems, sheet_nodes, Disp_global, Total_dofs = args
+    K_geometric = np.zeros((Total_dofs, Total_dofs))
+
+    for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
+        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
+        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
+        u_e = Disp_global[elem_dofs]
+
+        k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        K_geometric[np.ix_(elem_dofs, elem_dofs)] += k_geom
+
+    return K_geometric
+#%%
+
+#%%
+def visualize(sheet_nodes, sheet_edges, punch_nodes, punch_edges, die_nodes, die_edges):
+    for pair in sheet_edges.T:
+        first, second = pair[0], pair[1]
+        x_data = [sheet_nodes[0][first], sheet_nodes[0][second]]
+        y_data = [sheet_nodes[1][first], sheet_nodes[1][second]]
+        plt.plot(x_data, y_data, color="orange")
+
+    for pair in punch_edges.T:
+        first, second = pair[0], pair[1]
+        x_data = [punch_nodes[0][first], punch_nodes[0][second]]
+        y_data = [punch_nodes[1][first], punch_nodes[1][second]]
+        plt.plot(x_data, y_data, color="brown")
+
+    for pair in die_edges.T:
+        first, second = pair[0], pair[1]
+        x_data = [die_nodes[0][first], die_nodes[0][second]]
+        y_data = [die_nodes[1][first], die_nodes[1][second]]
+        plt.plot(x_data, y_data, color="brown")
+
+    # grid.draw()
+
+    plt.xlim(COORDINATE_MIN[0], COORDINATE_MAX[0])
+    plt.ylim(COORDINATE_MIN[1], COORDINATE_MAX[1])
+    plt.axis('equal')
+    plt.show()
+#%%
 
 def assemble_and_solve(
     sheet_nodes, sheet_elems, sheet_boundary, 
@@ -60,11 +145,13 @@ def assemble_and_solve(
 
             # plt.plot([gp[0], proj[0]], [gp[1], proj[1]], color='blue')
             
-            # Contact pressure & traction
+            # Penetration detection
             gap_normal = np.dot((proj - gp), surface_normal)
-            if gap_normal >= 0: # Proceed if penetration is not detected
+            if gap_normal >= 0: continue
+            angle_between = np.degrees(np.arctan2((proj - gp)[1], (proj - gp)[0]) - np.arctan2(surface_normal[1], surface_normal[0])) % 360
+            if not (180 - PENETRATION_ANGLE_THRESHOLD/2 <= angle_between <= 180 + PENETRATION_ANGLE_THRESHOLD/2):
                 continue
-
+            
             contact_pressure = PENALTY_STIFFNESS_NORMAL * np.abs(gap_normal)
             traction = contact_pressure * surface_normal
 
@@ -91,10 +178,21 @@ def assemble_and_solve(
                     K_contact[r_x, c_y] += k_block[0, 1]
                     K_contact[r_y, c_x] += k_block[1, 0]
                     K_contact[r_y, c_y] += k_block[1, 1]
-
 #%%
 
 #%% 4. BODY, INTERNAL FORCES & MATERIAL, GEOMETRIC STIFFNESS MATRICES
+
+    # with ProcessPoolExecutor(max_workers=4) as executor:
+    #     future_F_body = executor.submit(worker_f_body, (sheet_elems, sheet_nodes, Total_dofs))
+    #     future_F_int  = executor.submit(worker_f_int,  (sheet_elems, sheet_nodes, Disp_global, Total_dofs))
+    #     future_K_mat  = executor.submit(worker_K_mat,  (sheet_elems, sheet_nodes, Disp_global, Total_dofs))
+    #     future_K_geom = executor.submit(worker_K_geom, (sheet_elems, sheet_nodes, Disp_global, Total_dofs))
+    #
+    #     F_body      = future_F_body.result()
+    #     F_internal  = future_F_int.result()
+    #     K_material  = future_K_mat.result()
+    #     K_geometric = future_K_geom.result()
+
     for first, fourth, third, second in sheet_elems: # Ensure direction is CCW
         elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
         elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
@@ -103,7 +201,7 @@ def assemble_and_solve(
         # Integration
         f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
         f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
+        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
         k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
 
         # Assembly
@@ -139,11 +237,11 @@ if __name__ == "__main__":
     Total_dofs = sheet_nodes.shape[1] * 2
     Disp_global = np.zeros(Total_dofs)
     t = 0
-    num_loops = 1
+    num_loops = 5
     first_loop = True
 
     fixed_dofs = np.concatenate((
-        np.argsort(np.abs(sheet_nodes[0]))[:4] * 2,
+        np.argsort(np.abs(sheet_nodes[0]))[:5] * 2,
     ))
 
     # 3. TIME LOOP
@@ -157,6 +255,7 @@ if __name__ == "__main__":
 
         # 4. NEWTON-RAPHSON LOOP
         for iter in range(MAX_NEWTON_ITERATIONS):
+        # for iter in range(10):
             delta_u, res_norm = assemble_and_solve(
                 sheet_nodes, sheet_elems, sheet_boundary,
                 punch_nodes, punch_edges, die_nodes, die_edges,
@@ -165,38 +264,11 @@ if __name__ == "__main__":
             Disp_global += delta_u
 
             print(f"   Iter {iter}: ||R|| = {res_norm:.4e}")
-            if res_norm < TOLERANCE:
+            if res_norm < NEWTON_RAPHSON_TOLERANCE:
                 print("   >> Converged")
                 break
             else:
                 print("   !! WARNING: Did not converge this step !!")
 
-
-    sheet_nodes += Disp_global.reshape((2, -1), order='F')
-
-
-    for pair in sheet_edges.T:
-        first, second = pair[0], pair[1]
-        x_data = [sheet_nodes[0][first], sheet_nodes[0][second]]
-        y_data = [sheet_nodes[1][first], sheet_nodes[1][second]]
-        plt.plot(x_data, y_data, color="orange")
-
-    for pair in punch_edges.T:
-        first, second = pair[0], pair[1]
-        x_data = [punch_nodes[0][first], punch_nodes[0][second]]
-        y_data = [punch_nodes[1][first], punch_nodes[1][second]]
-        plt.plot(x_data, y_data, color="brown")
-
-    for pair in die_edges.T:
-        first, second = pair[0], pair[1]
-        x_data = [die_nodes[0][first], die_nodes[0][second]]
-        y_data = [die_nodes[1][first], die_nodes[1][second]]
-        plt.plot(x_data, y_data, color="brown")
-
-    # grid.draw()
-
-    plt.xlim(COORDINATE_MIN[0], COORDINATE_MAX[0])
-    plt.ylim(COORDINATE_MIN[1], COORDINATE_MAX[1])
-    plt.axis('equal')
-    plt.show()
+    visualize(sheet_nodes + Disp_global.reshape((2, -1), order='F'), sheet_edges, punch_nodes, punch_edges, die_nodes, die_edges)
 #%%
