@@ -23,10 +23,6 @@ D_MATRIX = np.array([
     [0, 0, 0.5 * (1 - 2 * POISSON_RATIO)]
 ]) * YOUNG_MODULUS / (1 + POISSON_RATIO) / (1 - 2 * POISSON_RATIO)
 
-MAX_NEWTON_ITERATIONS = 15
-TIME_STEP = 0.5e-3 #s
-NEWTON_RAPHSON_TOLERANCE = 1e1
-
 #%%
 def body_force_func(xi, eta, **kwargs):
     if kwargs == {}: return np.zeros(8)

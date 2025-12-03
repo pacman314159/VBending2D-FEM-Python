@@ -1,13 +1,16 @@
 import os
-from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import matplotlib.pyplot as plt
 from mesh_gen import *
 from grid_hash import *
 from maths import *
 from physics import *
+from animator import save_animation
 
-os.environ["OMP_NUM_THREADS"] = "1"
+NUM_LOOPS = 500
+TIME_STEP = 1e-3 #seconds
+MAX_NEWTON_ITERATIONS = 15
+NEWTON_RAPHSON_TOLERANCE = 1e0
 
 #%%
 def visualize(sheet_nodes, sheet_edges, punch_nodes, punch_edges, die_nodes, die_edges):
@@ -35,35 +38,6 @@ def visualize(sheet_nodes, sheet_edges, punch_nodes, punch_edges, die_nodes, die
     plt.ylim(COORDINATE_MIN[1], COORDINATE_MAX[1])
     plt.axis('equal')
     plt.show()
-#%%
-
-#%%
-def worker_physics(args):
-    subset_elems, sheet_nodes, Disp_global, Total_dofs = args
-    
-    F_body_local      = np.zeros(Total_dofs)
-    F_internal_local  = np.zeros(Total_dofs)
-    K_material_local  = np.zeros((Total_dofs, Total_dofs))
-    K_geometric_local = np.zeros((Total_dofs, Total_dofs))
-
-    for first, fourth, third, second in subset_elems: # Ensure direction is CCW
-        elem_nodes = sheet_nodes[:, [first, second, third, fourth]].T # (4, 2) matrix
-        elem_dofs = np.array([first*2, first*2+1, second*2, second*2+1, third*2, third*2+1, fourth*2, fourth*2+1]) # Global index map
-        u_e = Disp_global[elem_dofs]
-
-        # Integration
-        f_body = integrate_gauss_2D(body_force_func, elem_nodes, None, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        f_int = integrate_gauss_2D(internal_force_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        k_mat = integrate_gauss_2D(material_stiffness_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-        k_geom = integrate_gauss_2D(geometric_matrix_func, elem_nodes, u_e, NUM_GP_2D_ELEM_PER_SIDE) * WIDTH
-
-        # Assembly
-        F_body_local[elem_dofs] += f_body
-        F_internal_local[elem_dofs] += f_int
-        K_material_local[np.ix_(elem_dofs, elem_dofs)] += k_mat
-        K_geometric_local[np.ix_(elem_dofs, elem_dofs)] += k_geom
-
-    return F_body_local, F_internal_local, K_material_local, K_geometric_local
 #%%
 
 def assemble_and_solve(
@@ -184,35 +158,34 @@ def assemble_and_solve(
 
 #%%
 if __name__ == "__main__":
-    # 1. GEOMETRY GENERATIONS
+
+    # 1. SETUP HISTORY STORAGE
+    sim_history = []
+
+    # 2. GEOMETRY GENERATIONS
     sheet_nodes, sheet_edges, sheet_boundary, sheet_elems = sheet_mesh_generation(THICKNESS, LENGTH, RELATIVE_GROOVE_DEPTH, NOSE_RADIUS)
     punch_nodes, punch_edges = punch_mesh_generation( PUNCH_POSITION, PUNCH_ANGLE, PUNCH_RADIUS, PUNCH_HEIGHT, NUM_ELEM_PUNCH, PUNCH_REINFORCEMENT_MULTIPLE)
     die_nodes, die_edges = die_mesh_generation(DIE_ANGLE, DIE_GROOVE_LENGTH, DIE_CURVE_RADIUS, LENGTH, NUM_ELEM_DIE, DIE_REINFORCEMENT_MULTIPLE)
-
     grid = SpatialHash2D(COORDINATE_MIN, COORDINATE_MAX, GRID_SIZE)
 
-    # 2. GLOBAL VARIABLES
+    # 3. GLOAL VARIABLES
     Total_dofs = sheet_nodes.shape[1] * 2
     Disp_global = np.zeros(Total_dofs)
     t = 0
-    num_loops = 50
-    first_loop = True
-    damping = 1.0
+    fixed_dofs = np.argsort(np.abs(sheet_nodes[0]))[:5] * 2 # 5 most centered nodes
+    sim_history.append({
+        'time': 0.0,
+        'sheet': sheet_nodes.copy(),
+        'punch': punch_nodes.copy()
+    })
 
-    fixed_dofs = np.concatenate((
-        np.argsort(np.abs(sheet_nodes[0]))[:5] * 2,
-    ))
-
-    # 3. TIME LOOP
-    for time_step_idx in range(num_loops):
+    # 4. TIME LOOP
+    for time_step_idx in range(NUM_LOOPS):
         punch_nodes += PUNCH_VELOCITY * TIME_STEP 
-        if first_loop:
-            die_nodes += -PUNCH_VELOCITY * TIME_STEP * 1e-2
-            first_loop = False
         t += TIME_STEP
-        print(f"--- Step {time_step_idx}, Time {t:.4f} ---")
+        print(f"--- Step {time_step_idx}, Time {t * 1e3:.4f} ms ---")
 
-        # 4. NEWTON-RAPHSON LOOP
+        # 5. NEWTON-RAPHSON LOOP
         for iter in range(MAX_NEWTON_ITERATIONS):
             delta_u, res_norm = assemble_and_solve(
                 sheet_nodes, sheet_elems, sheet_boundary,
@@ -220,19 +193,28 @@ if __name__ == "__main__":
                 Disp_global, grid, fixed_dofs
             )
 
-            if res_norm > 1000:  damping = 0.1 
-            elif res_norm > 100: damping = 0.25
-            elif res_norm > 10:  damping = 0.5
-            else: damping = 1.0
-
             Disp_global += delta_u
 
             print(f"   Iter {iter}: ||R|| = {res_norm:.4e}")
             if res_norm < NEWTON_RAPHSON_TOLERANCE:
                 print("   >> Converged")
                 break
-            else:
-                print("   !! WARNING: Did not converge this step !!")
 
-    visualize(sheet_nodes + Disp_global.reshape((2, -1), order='F'), sheet_edges, punch_nodes, punch_edges, die_nodes, die_edges)
+        current_sheet_nodes = sheet_nodes + Disp_global.reshape((2, -1), order='F')
+        sim_history.append({
+            'time': t,
+            'sheet': current_sheet_nodes.copy(),
+            'punch': punch_nodes.copy()
+        })
+
+    # 6. POST-PROCESSING
+    print("Simulation complete. Processing animation...")
+    save_animation(
+        sim_history, 
+        die_nodes,
+        sheet_edges, punch_edges, die_edges,
+        COORDINATE_MIN, COORDINATE_MAX,
+        filename="simulation_result.gif"
+    )
+    visualize(current_sheet_nodes, sheet_edges, punch_nodes, punch_edges, die_nodes, die_edges)
 #%%

@@ -14,27 +14,6 @@ DIE_CURVE_RADIUS = 2.5 #mm
 
 PENETRATION_ANGLE_THRESHOLD = 30
 
-# def get_CFL_limit(nodes, young_modulus, poission_ratio, density, safety=0.9):
-#     """
-#     Compute CFL time step (in seconds) for a 2D plane-strain mesh.
-#     Converts E from GPa to N/mm^2 internally.
-#
-#     nodes: 2xN array, each column = [x0,y0; x1,y1] of an edge
-#     E: Young's modulus in Pa
-#     nu: Poisson's ratio
-#     rho: density in kg/m^3
-#     safety: CFL safety factor < 1
-#     """
-#
-#     E = young_modulus
-#     vu = poission_ratio
-#     rho = density
-#
-#     smallest_edge_meter = 1e-3 * min(np.linalg.norm(nodes[1, i] - nodes[0, i]) for i in range(nodes.shape[1]))
-#     wave_speed = np.sqrt(E*(1-vu)/(rho*(1+vu)*(1-2*vu))) # meters/sec
-#
-#     return smallest_edge_meter / wave_speed
-
 def find_gaussian_points_on_boundary(nodes, boundary_edges, num_gauss_points):
     """
     Generate Gaussian points and their corresponding weights on boundary segments.
